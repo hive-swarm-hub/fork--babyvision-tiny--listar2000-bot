@@ -44,12 +44,11 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
     client = OpenAI()
 
     img_b64 = load_image_b64(image_path)
-    img_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-
     model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
 
-    # Step 1: Describe the image (high detail for better perception)
     hi_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}", "detail": "high"}}
+
+    # Step 1: Describe the image in detail
     desc_response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": [
@@ -57,7 +56,7 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
             {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
         ]}],
         temperature=0,
-        max_completion_tokens=512,
+        max_completion_tokens=2048,
     )
     description = desc_response.choices[0].message.content
     if not description or not description.strip():
@@ -65,10 +64,10 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
             model=model,
             messages=[{"role": "user", "content": [
                 hi_url,
-                {"type": "text", "text": "Describe this image in detail. Focus on layout, elements, positions, differences."},
+                {"type": "text", "text": "Describe what you see in this image."},
             ]}],
             temperature=0,
-            max_completion_tokens=300,
+            max_completion_tokens=2048,
         )
         description = desc_response.choices[0].message.content
     description = description.strip() if description else "(no description available)"
@@ -77,7 +76,7 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
     if ans_type == "choice" and options:
         # Use 0-indexed options to match expected answer format
         opts = "\n".join(f"{i}. {o}" for i, o in enumerate(options))
-        prompt_a = f"""Here is a detailed description of the image:
+        prompt = f"""Here is a detailed description of the image:
 {description}
 
 Now answer this question about the image:
@@ -87,63 +86,25 @@ Options:
 {opts}
 
 Think step by step, then give your final answer as ONLY the option number (0, 1, 2, or 3). Put your final answer on the last line."""
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
-            temperature=0,
-            max_completion_tokens=1024,
-        )
-        raw_output = response.choices[0].message.content.strip()
-        answer = extract_answer(raw_output, ans_type)
     else:
-        # For blank questions: try two different framings
-        prompt_a = f"""Question: {question}
+        prompt = f"""Question: {question}
 
 Image analysis notes:
 {description}
 
 Look at the image carefully. Think step by step. Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""
 
-        q_lower = question.lower()
-        if any(w in q_lower for w in ["how many", "count"]):
-            prompt_b = f"""Image description: {description}
-
-{question}
-
-IMPORTANT: Before giving your count, list each item you're counting with its approximate position (e.g., "row 1: item at col 2, item at col 5"). Then total them up.
-Put ONLY the final count number on the last line."""
-        else:
-            prompt_b = f"""Here is a detailed description of the image:
-{description}
-
-Now answer this question about the image:
-{question}
-
-Think step by step, then give your final answer in the exact format requested. Put your final answer on the last line, with ONLY the answer value and nothing else."""
-
-        resp_a = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_a}]}],
-            temperature=0.1,
-            max_completion_tokens=1024,
-        )
-        answer_a = extract_answer(resp_a.choices[0].message.content.strip(), ans_type)
-
-        resp_b = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt_b}]}],
-            temperature=0.1,
-            max_completion_tokens=1024,
-        )
-        answer_b = extract_answer(resp_b.choices[0].message.content.strip(), ans_type)
-
-        if answer_a == answer_b:
-            answer = answer_a
-            raw_output = resp_a.choices[0].message.content.strip()
-        else:
-            # When answers disagree, prefer prompt A (question-first, better for counting)
-            answer = answer_a
-            raw_output = f"A={answer_a} B={answer_b} PICKED=A"
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt}]}],
+        temperature=0,
+        max_completion_tokens=4096,
+    )
+    raw_output = response.choices[0].message.content
+    if not raw_output:
+        raw_output = ""
+    raw_output = raw_output.strip()
+    answer = extract_answer(raw_output, ans_type)
 
     # Save trajectory
     traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")

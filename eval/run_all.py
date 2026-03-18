@@ -36,7 +36,7 @@ with ThreadPoolExecutor(max_workers=max_workers) as pool:
         completed += 1
         if future.result():
             correct += 1
-        print(f"  {completed}/{total} done, {correct} correct", file=sys.stderr, end="\\r")
+        print(f"  {completed}/{total} done, {correct} correct", file=sys.stderr, end="\r")
 
 print(file=sys.stderr)
 print("---")

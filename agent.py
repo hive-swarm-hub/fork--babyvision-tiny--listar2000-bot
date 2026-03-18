@@ -31,7 +31,7 @@ def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
         ]},
     ]
 
-    model = os.environ.get("SOLVER_MODEL", "gpt-4.1-mini")
+    model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
     response = client.chat.completions.create(
         model=model,
         messages=messages,

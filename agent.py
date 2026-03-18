@@ -10,6 +10,7 @@ import json
 import base64
 import re
 import io
+from collections import Counter
 
 from openai import OpenAI
 from PIL import Image
@@ -40,41 +41,40 @@ def extract_answer(raw_output, ans_type):
     return answer
 
 
-def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
-    client = OpenAI()
-
-    img_b64 = load_image_b64(image_path)
-    model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
-
-    hi_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}", "detail": "high"}}
-
-    # Step 1: Describe the image in detail
-    desc_response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": [
-            hi_url,
-            {"type": "text", "text": "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise."},
-        ]}],
-        temperature=0,
-        max_completion_tokens=2048,
+def call_model(client, model, messages, temperature=0, max_tokens=4096):
+    """Make an API call with retry on empty response."""
+    response = client.chat.completions.create(
+        model=model, messages=messages,
+        temperature=temperature, max_completion_tokens=max_tokens,
     )
-    description = desc_response.choices[0].message.content
-    if not description or not description.strip():
-        desc_response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": [
-                hi_url,
-                {"type": "text", "text": "Describe what you see in this image."},
-            ]}],
-            temperature=0,
-            max_completion_tokens=2048,
+    content = response.choices[0].message.content
+    if not content or not content.strip():
+        response = client.chat.completions.create(
+            model=model, messages=messages,
+            temperature=0.2, max_completion_tokens=max_tokens,
         )
-        description = desc_response.choices[0].message.content
-    description = description.strip() if description else "(no description available)"
+        content = response.choices[0].message.content
+    return content.strip() if content else ""
 
-    # Step 2: Answer the question
+
+DESC_PROMPTS = [
+    "Describe this image in detail. Focus on: the layout/grid structure, all visual elements (shapes, colors, patterns, numbers, letters), positions of elements, any differences or similarities between elements, and any spatial relationships. Be thorough and precise.",
+    "Analyze this image carefully. List every distinct element you can see, its position, color, and shape. Note the overall structure (grid, rows, columns) and any patterns or anomalies.",
+    "Look at this image and describe it systematically. Start from the top-left and work across and down. Note every shape, color, number, letter, and spatial relationship you observe.",
+]
+
+
+def single_run(client, model, hi_url, question, ans_type, options, desc_prompt, answer_temp):
+    """One full describe-then-answer pipeline."""
+    description = call_model(
+        client, model,
+        [{"role": "user", "content": [hi_url, {"type": "text", "text": desc_prompt}]}],
+        temperature=0, max_tokens=2048,
+    )
+    if not description:
+        description = "(no description available)"
+
     if ans_type == "choice" and options:
-        # Use 0-indexed options to match expected answer format
         opts = "\n".join(f"{i}. {o}" for i, o in enumerate(options))
         prompt = f"""Here is a detailed description of the image:
 {description}
@@ -85,26 +85,48 @@ Now answer this question about the image:
 Options:
 {opts}
 
-Think step by step, then give your final answer as ONLY the option number (0, 1, 2, or 3). Put your final answer on the last line."""
+Think step by step, then give your final answer as ONLY the option number (0, 1, 2, or 3) on the last line."""
     else:
         prompt = f"""Question: {question}
 
 Image analysis notes:
 {description}
 
-Look at the image carefully. Think step by step. Give your final answer in the exact format requested. Put ONLY the answer value on the last line."""
+Look at the image carefully. Think step by step. Pay close attention to the exact answer format requested in the question. Put ONLY the final answer value on the last line."""
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": [hi_url, {"type": "text", "text": prompt}]}],
-        temperature=0,
-        max_completion_tokens=4096,
+    raw = call_model(
+        client, model,
+        [{"role": "user", "content": [hi_url, {"type": "text", "text": prompt}]}],
+        temperature=answer_temp, max_tokens=4096,
     )
-    raw_output = response.choices[0].message.content
-    if not raw_output:
-        raw_output = ""
-    raw_output = raw_output.strip()
-    answer = extract_answer(raw_output, ans_type)
+    return raw, description
+
+
+def solve(question: str, image_path: str, ans_type: str, options: list) -> str:
+    client = OpenAI()
+
+    img_b64 = load_image_b64(image_path)
+    model = os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
+
+    hi_url = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}", "detail": "high"}}
+
+    # Run 3 independent describe-then-answer pipelines with different description prompts
+    answers = []
+    raw_outputs = []
+    descriptions = []
+    for i in range(3):
+        raw, desc = single_run(
+            client, model, hi_url, question, ans_type, options,
+            DESC_PROMPTS[i], answer_temp=[0, 0.2, 0.4][i],
+        )
+        raw_outputs.append(raw)
+        descriptions.append(desc)
+        answers.append(extract_answer(raw, ans_type))
+
+    # Majority vote
+    counter = Counter(answers)
+    answer = counter.most_common(1)[0][0]
+    best_idx = answers.index(answer)
 
     # Save trajectory
     traj_dir = os.environ.get("EVAL_TRAJECTORY_DIR")
@@ -114,12 +136,14 @@ Look at the image carefully. Think step by step. Give your final answer in the e
         trajectory = {
             "index": int(idx),
             "model": model,
-            "description": description,
             "question": question,
             "image_path": image_path,
             "ans_type": ans_type,
             "options": options,
-            "raw_response": raw_output,
+            "all_answers": answers,
+            "voted_answer": answer,
+            "description": descriptions[best_idx],
+            "raw_response": raw_outputs[best_idx],
             "parsed_answer": answer,
         }
         with open(os.path.join(traj_dir, f"{idx}.json"), "w") as f:

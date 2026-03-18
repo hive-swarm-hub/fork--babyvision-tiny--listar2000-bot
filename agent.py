@@ -61,6 +61,7 @@ def api_call(client, model, messages, temperature=0, max_tokens=1024):
         resp = client.chat.completions.create(
             model=model, messages=messages,
             temperature=temperature, max_completion_tokens=max_tokens,
+            seed=42,
         )
         content = resp.choices[0].message.content
         if content and content.strip():
